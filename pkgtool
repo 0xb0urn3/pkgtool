@@ -477,7 +477,7 @@ class PKGTool:
             logging.error(f"Error retrieving last update time: {e}")
         return "Never"
 
-def check_for_quit(self) -> bool:
+    def check_for_quit(self) -> bool:
         """
         Check if user has pressed 'q' to quit the current view.
         
