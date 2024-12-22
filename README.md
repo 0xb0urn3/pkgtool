@@ -62,20 +62,6 @@ cargo build --release
 sudo cp target/release/pkgtool /usr/local/bin/
 ```
 
-### Distribution Packages
-```bash
-# Debian/Ubuntu
-sudo apt install pkgtool
-
-# Arch Linux (AUR)
-yay -S pkgtool
-
-# Fedora
-sudo dnf install pkgtool
-
-# Other distributions coming soon
-```
-
 ## Quick Start
 
 Launch pkgtool with:
