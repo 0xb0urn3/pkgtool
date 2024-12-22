@@ -249,7 +249,34 @@ class PKGTool:
         self.theme = self.load_theme()
         self.load_history()
         self.load_config()
-        
+        def detect_pkg_manager(self) -> Optional[str]:
+    """
+    Detect the system's package manager by checking for binary paths
+    and distribution-specific markers.
+    """
+    # Check for common distribution markers
+    if os.path.exists("/etc/debian_version"):
+        if os.path.exists(self.PACKAGE_MANAGERS["apt"]["path"]):
+            return "apt"
+            
+    elif os.path.exists("/etc/arch-release"):
+        if os.path.exists(self.PACKAGE_MANAGERS["pacman"]["path"]):
+            return "pacman"
+            
+    elif os.path.exists("/etc/fedora-release") or os.path.exists("/etc/redhat-release"):
+        if os.path.exists(self.PACKAGE_MANAGERS["dnf"]["path"]):
+            return "dnf"
+            
+    elif platform.system() == "Darwin":  # macOS
+        if os.path.exists(self.PACKAGE_MANAGERS["brew"]["path"]):
+            return "brew"
+    
+    # Fallback detection by checking binary paths
+    for manager, config in self.PACKAGE_MANAGERS.items():
+        if os.path.exists(config["path"]):
+            return manager
+            
+    return None
         # Start system monitoring
         asyncio.create_task(self.background_monitoring())
     
@@ -581,14 +608,14 @@ class PKGTool:
             sys.exit(0)
 
 if __name__ == "__main__":
-    # Set up asyncio event loop
-    loop = asyncio.get_event_loop()
-    tool = PKGTool()
-    
     try:
-        loop.run_until_complete(tool.run())
+        # Modern asyncio initialization
+        if platform.system() == "Windows":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            
+        tool = PKGTool()
+        asyncio.run(tool.run())
+        
     except Exception as e:
         logging.error(f"Fatal error: {e}")
         sys.exit(1)
-    finally:
-        loop.close()
