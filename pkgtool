@@ -374,7 +374,7 @@ class PKGTool:
         
         self.console.print(Panel(menu_table))
 
-  async def handle_command(self, command: str) -> Tuple[bool, str]:
+    async def handle_command(self, command: str) -> Tuple[bool, str]:
         """Execute command asynchronously with progress indication."""
         with Progress(
             SpinnerColumn(),
