@@ -33,8 +33,46 @@ class SystemMonitor:
     """System resource monitoring and analysis."""
     
     def __init__(self):
-        self.db_path = Path.home() / '.pkg_tool' / 'monitoring.db'
-        self.initialize_db()
+        self.console = Console()
+        self.monitor = SystemMonitor()
+        self.package_db = PackageDatabase(Path.home())
+        self.manager = self.detect_pkg_manager()
+        self.history_file = Path.home() / '.pkg_tool' / 'history.json'
+        self.config_file = Path.home() / '.pkg_tool' / 'config.json'
+        self.theme = self.load_theme()
+        self.load_history()
+        self.load_config()
+        # Start system monitoring
+        asyncio.create_task(self.background_monitoring())
+    
+    def detect_pkg_manager(self) -> Optional[str]:
+        """
+        Detect the system's package manager by checking for binary paths
+        and distribution-specific markers.
+        """
+        # Check for common distribution markers
+        if os.path.exists("/etc/debian_version"):
+            if os.path.exists(self.PACKAGE_MANAGERS["apt"]["path"]):
+                return "apt"
+                
+        elif os.path.exists("/etc/arch-release"):
+            if os.path.exists(self.PACKAGE_MANAGERS["pacman"]["path"]):
+                return "pacman"
+                
+        elif os.path.exists("/etc/fedora-release") or os.path.exists("/etc/redhat-release"):
+            if os.path.exists(self.PACKAGE_MANAGERS["dnf"]["path"]):
+                return "dnf"
+                
+        elif platform.system() == "Darwin":  # macOS
+            if os.path.exists(self.PACKAGE_MANAGERS["brew"]["path"]):
+                return "brew"
+        
+        # Fallback detection by checking binary paths
+        for manager, config in self.PACKAGE_MANAGERS.items():
+            if os.path.exists(config["path"]):
+                return manager
+                
+        return None
     
     def initialize_db(self):
         """Initialize SQLite database for system monitoring."""
@@ -249,34 +287,6 @@ class PKGTool:
         self.theme = self.load_theme()
         self.load_history()
         self.load_config()
-        def detect_pkg_manager(self) -> Optional[str]:
-    """
-    Detect the system's package manager by checking for binary paths
-    and distribution-specific markers.
-    """
-    # Check for common distribution markers
-    if os.path.exists("/etc/debian_version"):
-        if os.path.exists(self.PACKAGE_MANAGERS["apt"]["path"]):
-            return "apt"
-            
-    elif os.path.exists("/etc/arch-release"):
-        if os.path.exists(self.PACKAGE_MANAGERS["pacman"]["path"]):
-            return "pacman"
-            
-    elif os.path.exists("/etc/fedora-release") or os.path.exists("/etc/redhat-release"):
-        if os.path.exists(self.PACKAGE_MANAGERS["dnf"]["path"]):
-            return "dnf"
-            
-    elif platform.system() == "Darwin":  # macOS
-        if os.path.exists(self.PACKAGE_MANAGERS["brew"]["path"]):
-            return "brew"
-    
-    # Fallback detection by checking binary paths
-    for manager, config in self.PACKAGE_MANAGERS.items():
-        if os.path.exists(config["path"]):
-            return manager
-            
-    return None
         # Start system monitoring
         asyncio.create_task(self.background_monitoring())
     
