@@ -477,32 +477,45 @@ class PKGTool:
             logging.error(f"Error retrieving last update time: {e}")
         return "Never"
 
-    def check_for_quit(self) -> bool:
-        """
-        Check if user has pressed 'q' to quit the current view.
-        
-        Returns:
-            True if quit was requested, False otherwise
-        """
-        try:
-            # Set up non-blocking input
-            import msvcrt if platform.system() == "Windows" else termios
-            if platform.system() == "Windows":
+ def check_for_quit(self) -> bool:
+    """
+    Check if user has pressed 'q' to quit the current view.
+    
+    This method handles keyboard input checking in a cross-platform way,
+    using different approaches for Windows and Unix-like systems.
+    
+    Returns:
+        True if quit was requested, False otherwise
+    """
+    try:
+        # Handle Windows systems
+        if platform.system() == "Windows":
+            try:
+                import msvcrt
                 if msvcrt.kbhit():
                     return msvcrt.getch().decode().lower() == 'q'
-            else:
-                # Unix-like systems
-                fd = sys.stdin.fileno()
-                old_settings = termios.tcgetattr(fd)
-                try:
-                    tty.setraw(sys.stdin.fileno())
-                    ch = sys.stdin.read(1)
-                finally:
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            except ImportError:
+                return False
+        # Handle Unix-like systems
+        else:
+            import termios
+            import tty
+            import sys
+            
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            try:
+                tty.setraw(sys.stdin.fileno())
+                ch = sys.stdin.read(1)
                 return ch.lower() == 'q'
-        except Exception:
-            return False
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                
+    except Exception as e:
+        logging.error(f"Error checking for quit input: {e}")
         return False
+    
+    return False
 
     def create_metrics_display(self, metrics: Dict[str, List[Tuple[int, float]]]) -> str:
         """
