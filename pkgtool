@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+
+import os
+import subprocess
+import sys
+import shutil
+import logging
+import json
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('package_manager.log'),
+        logging.StreamHandler()
+    ]
+)
+
+class PackageManager:
+    """A class to handle package management operations across different Linux distributions."""
+    
+    def __init__(self):
+        self.manager = self.detect_pkg_manager()
+        self.history_file = Path.home() / '.package_manager_history.json'
+        self.load_history()
+    
+    def load_history(self) -> None:
+        """Load package management history from JSON file."""
+        if self.history_file.exists():
+            try:
+                with open(self.history_file) as f:
+                    self.history = json.load(f)
+            except json.JSONDecodeError:
+                self.history = []
+        else:
+            self.history = []
+
+    def save_history(self, action: str, packages: List[str], success: bool) -> None:
+        """Save package management actions to history."""
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'action': action,
+            'packages': packages,
+            'package_manager': self.manager,
+            'success': success
+        }
+        self.history.append(entry)
+        
+        with open(self.history_file, 'w') as f:
+            json.dump(self.history, f, indent=2)
+
+    @staticmethod
+    def detect_pkg_manager() -> Optional[str]:
+        """Detect the system's package manager."""
+        managers = {
+            "apt": "/usr/bin/apt",
+            "pacman": "/usr/bin/pacman",
+            "dnf": "/usr/bin/dnf",
+            "zypper": "/usr/bin/zypper",
+            "xbps-install": "/usr/bin/xbps-install"
+        }
+        
+        for manager, path in managers.items():
+            if os.path.exists(path):
+                logging.info(f"Detected package manager: {manager}")
+                return manager
+        return None
+
+    # Extended command mapping with new features
+    COMMANDS = {
+        "apt": {
+            "search": "apt search {pkg}",
+            "install": "sudo apt install -y {pkg}",
+            "remove": "sudo apt remove -y {pkg}",
+            "update": "sudo apt update && sudo apt upgrade -y",
+            "clean": "sudo apt autoremove -y && sudo apt clean",
+            "info": "apt show {pkg}",
+            "list": "apt list --installed",
+            "hold": "sudo apt-mark hold {pkg}",
+            "unhold": "sudo apt-mark unhold {pkg}",
+            "depends": "apt-cache depends {pkg}",
+            "size": "apt-cache show {pkg} | grep 'Size'",
+        },
+        "pacman": {
+            "search": "pacman -Ss {pkg}",
+            "install": "sudo pacman -S --noconfirm {pkg}",
+            "remove": "sudo pacman -R --noconfirm {pkg}",
+            "update": "sudo pacman -Syu --noconfirm",
+            "clean": "sudo pacman -Sc --noconfirm",
+            "info": "pacman -Qi {pkg}",
+            "list": "pacman -Q",
+            "hold": "sudo pacman -D --asexplicit {pkg}",
+            "unhold": "sudo pacman -D --asdeps {pkg}",
+            "depends": "pacman -Qi {pkg} | grep 'Depends On'",
+            "size": "pacman -Qi {pkg} | grep 'Size'",
+        },
+        "dnf": {
+            "search": "dnf search {pkg}",
+            "install": "sudo dnf install -y {pkg}",
+            "remove": "sudo dnf remove -y {pkg}",
+            "update": "sudo dnf upgrade -y",
+            "clean": "sudo dnf clean all",
+            "info": "dnf info {pkg}",
+            "list": "dnf list installed",
+            "hold": "sudo dnf mark install {pkg}",
+            "unhold": "sudo dnf mark remove {pkg}",
+            "depends": "dnf repoquery --requires {pkg}",
+            "size": "dnf info {pkg} | grep 'Size'",
+        }
+        # Additional package managers can be added here
+    }
+
+    def execute_command(self, command: str) -> Tuple[bool, str]:
+        """Execute a shell command and return success status and output."""
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                check=True,
+                text=True,
+                capture_output=True
+            )
+            return True, result.stdout
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Command failed: {e.stderr}"
+            logging.error(error_msg)
+            return False, error_msg
+
+    def batch_operation(self, action: str, packages: List[str]) -> None:
+        """Perform operations on multiple packages."""
+        if not packages:
+            print("No packages specified.")
+            return
+
+        success = True
+        for pkg in packages:
+            command = self.COMMANDS[self.manager][action].format(pkg=pkg)
+            ok, output = self.execute_command(command)
+            success = success and ok
+            print(output)
+
+        self.save_history(action, packages, success)
+
+    def show_menu(self) -> None:
+        """Display the interactive menu."""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        print("=" * 50)
+        print("          Advanced Package Manager Menu          ")
+        print("=" * 50)
+        print("1.  Search for packages")
+        print("2.  Install packages (space-separated for multiple)")
+        print("3.  Remove packages (space-separated for multiple)")
+        print("4.  Update system")
+        print("5.  Clean system")
+        print("6.  Display package information")
+        print("7.  List installed packages")
+        print("8.  Hold package version")
+        print("9.  Unhold package version")
+        print("10. Show package dependencies")
+        print("11. Show package size")
+        print("12. View operation history")
+        print("13. Exit")
+        print("=" * 50)
+
+    def view_history(self) -> None:
+        """Display package management history."""
+        if not self.history:
+            print("No history available.")
+            return
+            
+        print("\nPackage Management History:")
+        print("=" * 50)
+        for entry in self.history[-10:]:  # Show last 10 entries
+            status = "✓" if entry['success'] else "✗"
+            print(f"{entry['timestamp']} [{status}] {entry['action']}: {', '.join(entry['packages'])}")
+
+    def run(self) -> None:
+        """Main program loop."""
+        if not self.manager:
+            logging.error("Unsupported package manager or distribution.")
+            sys.exit(1)
+
+        while True:
+            self.show_menu()
+            choice = input("\nEnter your choice (1-13): ").strip()
+
+            if choice == "13":
+                print("Exiting...")
+                sys.exit(0)
+
+            if choice == "12":
+                self.view_history()
+                input("\nPress Enter to continue...")
+                continue
+
+            if choice in ["4", "5"]:
+                command = self.COMMANDS[self.manager]["update" if choice == "4" else "clean"]
+                success, output = self.execute_command(command)
+                print(output)
+                self.save_history("update" if choice == "4" else "clean", [], success)
+            elif choice in ["1", "2", "3", "6", "8", "9", "10", "11"]:
+                action_map = {
+                    "1": "search", "2": "install", "3": "remove",
+                    "6": "info", "8": "hold", "9": "unhold",
+                    "10": "depends", "11": "size"
+                }
+                packages = input("Enter package name(s): ").split()
+                self.batch_operation(action_map[choice], packages)
+            elif choice == "7":
+                success, output = self.execute_command(self.COMMANDS[self.manager]["list"])
+                print(output)
+            else:
+                print("Invalid choice, please try again.")
+            
+            input("\nPress Enter to continue...")
+
+if __name__ == "__main__":
+    try:
+        manager = PackageManager()
+        manager.run()
+    except KeyboardInterrupt:
+        print("\nProgram terminated by user.")
+        sys.exit(0)
