@@ -7,293 +7,588 @@ import shutil
 import logging
 import json
 import time
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any
+import psutil
+import platform
+import curses
+import asyncio
+import aiohttp
+import sqlite3
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
 from rich.syntax import Syntax
 from rich.prompt import Prompt, Confirm
+from rich.markdown import Markdown
+from rich.tree import Tree
+from rich.box import HEAVY
+from rich.style import Style
 
-# Initialize Rich console
-console = Console()
+class SystemMonitor:
+    """System resource monitoring and analysis."""
+    
+    def __init__(self):
+        self.db_path = Path.home() / '.pkg_tool' / 'monitoring.db'
+        self.initialize_db()
+    
+    def initialize_db(self):
+        """Initialize SQLite database for system monitoring."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS system_metrics (
+                    timestamp INTEGER PRIMARY KEY,
+                    cpu_percent REAL,
+                    memory_percent REAL,
+                    disk_usage REAL,
+                    network_sent INTEGER,
+                    network_recv INTEGER
+                )
+            """)
+            
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS package_operations (
+                    timestamp INTEGER PRIMARY KEY,
+                    operation TEXT,
+                    package TEXT,
+                    status TEXT,
+                    duration REAL
+                )
+            """)
+    
+    def collect_metrics(self) -> Dict[str, Any]:
+        """Collect current system metrics."""
+        metrics = {
+            'timestamp': int(time.time()),
+            'cpu_percent': psutil.cpu_percent(interval=1),
+            'memory_percent': psutil.virtual_memory().percent,
+            'disk_usage': psutil.disk_usage('/').percent,
+            'network_sent': psutil.net_io_counters().bytes_sent,
+            'network_recv': psutil.net_io_counters().bytes_recv
+        }
+        
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute(
+                """INSERT INTO system_metrics VALUES (:timestamp, :cpu_percent, 
+                   :memory_percent, :disk_usage, :network_sent, :network_recv)""",
+                metrics
+            )
+        
+        return metrics
+    
+    def get_historical_metrics(self, hours: int = 24) -> Dict[str, List[Tuple[int, float]]]:
+        """Retrieve historical metrics for specified time period."""
+        cutoff = int(time.time() - hours * 3600)
+        
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute(
+                "SELECT * FROM system_metrics WHERE timestamp > ? ORDER BY timestamp",
+                (cutoff,)
+            )
+            rows = cursor.fetchall()
+            
+        metrics = {
+            'cpu': [(row[0], row[1]) for row in rows],
+            'memory': [(row[0], row[2]) for row in rows],
+            'disk': [(row[0], row[3]) for row in rows],
+            'network': [(row[0], row[4] + row[5]) for row in rows]
+        }
+        
+        return metrics
 
-# Configure logging with rich formatting
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    handlers=[
-        logging.FileHandler("pkg_tool.log"),
-        logging.StreamHandler()
-    ]
-)
+class PackageDatabase:
+    """Local package database management."""
+    
+    def __init__(self, path: Path):
+        self.db_path = path / '.pkg_tool' / 'packages.db'
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.initialize_db()
+    
+    def initialize_db(self):
+        """Initialize SQLite database for package tracking."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS packages (
+                    name TEXT PRIMARY KEY,
+                    version TEXT,
+                    install_date INTEGER,
+                    size INTEGER,
+                    dependencies TEXT,
+                    description TEXT,
+                    status TEXT
+                )
+            """)
+    
+    def add_package(self, package_info: Dict[str, Any]):
+        """Add or update package information in database."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO packages 
+                VALUES (:name, :version, :install_date, :size, :dependencies, :description, :status)
+            """, package_info)
+    
+    def get_package(self, name: str) -> Optional[Dict[str, Any]]:
+        """Retrieve package information from database."""
+        with sqlite3.connect(str(self.db_path)) as conn:
+            cursor = conn.execute("SELECT * FROM packages WHERE name = ?", (name,))
+            row = cursor.fetchone()
+            
+        if row:
+            return {
+                'name': row[0],
+                'version': row[1],
+                'install_date': row[2],
+                'size': row[3],
+                'dependencies': row[4],
+                'description': row[5],
+                'status': row[6]
+            }
+        return None
 
 class PKGTool:
-    """Advanced package management tool with modern CLI interface."""
+    """Advanced package management tool with modern CLI interface and monitoring."""
     
-    VERSION = "0.1.2-ALPHA"
+    VERSION = "0.1.3-ALPHA"
     AUTHOR = "0xb0urn3"
+    
+    # Extended package manager support
+    PACKAGE_MANAGERS = {
+        "apt": {
+            "path": "/usr/bin/apt",
+            "commands": {
+                "search": "apt search {pkg}",
+                "install": "sudo apt install -y {pkg}",
+                "remove": "sudo apt remove -y {pkg}",
+                "update": "sudo apt update && sudo apt upgrade -y",
+                "clean": "sudo apt autoremove -y && sudo apt clean",
+                "info": "apt show {pkg}",
+                "list": "apt list --installed",
+                "hold": "sudo apt-mark hold {pkg}",
+                "unhold": "sudo apt-mark unhold {pkg}",
+                "depends": "apt-cache depends {pkg}",
+                "size": "apt-cache show {pkg} | grep 'Size'",
+                "verify": "debsums {pkg}",
+                "orphans": "deborphan",
+                "rollback": "sudo apt install {pkg}={version}",
+                "changelog": "apt changelog {pkg}"
+            }
+        },
+        "pacman": {
+            "path": "/usr/bin/pacman",
+            "commands": {
+                "search": "pacman -Ss {pkg}",
+                "install": "sudo pacman -S --noconfirm {pkg}",
+                "remove": "sudo pacman -R --noconfirm {pkg}",
+                "update": "sudo pacman -Syu --noconfirm",
+                "clean": "sudo pacman -Sc --noconfirm",
+                "info": "pacman -Qi {pkg}",
+                "list": "pacman -Q",
+                "hold": "sudo pacman -D --asexplicit {pkg}",
+                "unhold": "sudo pacman -D --asdeps {pkg}",
+                "depends": "pacman -Qi {pkg} | grep 'Depends On'",
+                "size": "pacman -Qi {pkg} | grep 'Size'",
+                "verify": "pacman -Qk {pkg}",
+                "orphans": "pacman -Qtd",
+                "rollback": "sudo pacman -U /var/cache/pacman/pkg/{pkg}-{version}.pkg.tar.zst",
+                "changelog": "pacman -Qc {pkg}"
+            }
+        },
+        "dnf": {
+            "path": "/usr/bin/dnf",
+            "commands": {
+                "search": "dnf search {pkg}",
+                "install": "sudo dnf install -y {pkg}",
+                "remove": "sudo dnf remove -y {pkg}",
+                "update": "sudo dnf upgrade -y",
+                "clean": "sudo dnf clean all",
+                "info": "dnf info {pkg}",
+                "list": "dnf list installed",
+                "hold": "sudo dnf mark install {pkg}",
+                "unhold": "sudo dnf mark remove {pkg}",
+                "depends": "dnf repoquery --requires {pkg}",
+                "size": "dnf info {pkg} | grep 'Size'",
+                "verify": "rpm -V {pkg}",
+                "orphans": "package-cleanup --leaves",
+                "rollback": "sudo dnf downgrade {pkg}-{version}",
+                "changelog": "dnf changelog {pkg}"
+            }
+        },
+        "brew": {
+            "path": "/usr/local/bin/brew",
+            "commands": {
+                "search": "brew search {pkg}",
+                "install": "brew install {pkg}",
+                "remove": "brew uninstall {pkg}",
+                "update": "brew update && brew upgrade",
+                "clean": "brew cleanup",
+                "info": "brew info {pkg}",
+                "list": "brew list",
+                "depends": "brew deps {pkg}",
+                "size": "du -sh $(brew --prefix)/Cellar/{pkg}",
+                "verify": "brew doctor",
+                "orphans": "brew leaves",
+                "rollback": "brew switch {pkg} {version}",
+                "changelog": "brew log {pkg}"
+            }
+        }
+    }
     
     def __init__(self):
         self.console = Console()
+        self.monitor = SystemMonitor()
+        self.package_db = PackageDatabase(Path.home())
         self.manager = self.detect_pkg_manager()
-        self.history_file = Path.home() / '.pkg_tool_history.json'
-        self.config_file = Path.home() / '.pkg_tool_config.json'
+        self.history_file = Path.home() / '.pkg_tool' / 'history.json'
+        self.config_file = Path.home() / '.pkg_tool' / 'config.json'
+        self.theme = self.load_theme()
         self.load_history()
         self.load_config()
         
-    def load_config(self) -> None:
-        """Load tool configuration from JSON file."""
-        default_config = {
-            "theme": "cyber",
-            "auto_cleanup": True,
-            "backup_enabled": True,
-            "backup_dir": str(Path.home() / '.pkg_tool_backups'),
-            "max_history": 100,
-            "sync_enabled": False,
-            "sync_url": "",
-        }
-        
-        if self.config_file.exists():
-            try:
-                with open(self.config_file) as f:
-                    self.config = {**default_config, **json.load(f)}
-            except json.JSONDecodeError:
-                self.config = default_config
-        else:
-            self.config = default_config
-            self.save_config()
+        # Start system monitoring
+        asyncio.create_task(self.background_monitoring())
     
-    def save_config(self) -> None:
-        """Save current configuration to file."""
-        with open(self.config_file, 'w') as f:
-            json.dump(self.config, f, indent=2)
-
-    def load_history(self) -> None:
-        """Load package management history with enhanced metadata."""
-        if self.history_file.exists():
-            try:
-                with open(self.history_file) as f:
-                    self.history = json.load(f)
-            except json.JSONDecodeError:
-                self.history = []
-        else:
-            self.history = []
-
-    def save_history(self, action: str, packages: List[str], success: bool, metadata: Dict[str, Any] = None) -> None:
-        """Save package management actions with extended metadata."""
-        entry = {
-            'timestamp': datetime.now().isoformat(),
-            'action': action,
-            'packages': packages,
-            'package_manager': self.manager,
-            'success': success,
-            'system_info': self.get_system_info(),
-            'metadata': metadata or {}
+    async def background_monitoring(self):
+        """Background task for continuous system monitoring."""
+        while True:
+            self.monitor.collect_metrics()
+            await asyncio.sleep(60)  # Collect metrics every minute
+    
+    def load_theme(self) -> Dict[str, Style]:
+        """Load custom UI theme styles."""
+        return {
+            'header': Style(color="cyan", bold=True),
+            'title': Style(color="blue", bold=True),
+            'menu_item': Style(color="white"),
+            'highlight': Style(color="yellow", bold=True),
+            'error': Style(color="red", bold=True),
+            'success': Style(color="green", bold=True)
         }
-        self.history.append(entry)
+    
+    def show_dashboard(self) -> None:
+        """Display enhanced system dashboard with metrics."""
+        layout = Layout()
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body"),
+            Layout(name="footer", size=3)
+        )
         
-        # Maintain history size limit
-        if len(self.history) > self.config['max_history']:
-            self.history = self.history[-self.config['max_history']:]
+        # Header with system info and tool version
+        header = Panel(
+            f"[bold cyan]PKG Tool v{self.VERSION}[/] by [bold red]{self.AUTHOR}[/]\n"
+            f"System: {platform.system()} {platform.release()}",
+            style="cyan"
+        )
         
-        with open(self.history_file, 'w') as f:
-            json.dump(self.history, f, indent=2)
-
-    @staticmethod
-    def get_system_info() -> Dict[str, str]:
-        """Gather system information for logging."""
-        info = {}
-        try:
-            with open('/etc/os-release') as f:
-                for line in f:
-                    if '=' in line:
-                        key, value = line.strip().split('=', 1)
-                        info[key] = value.strip('"')
-        except FileNotFoundError:
-            pass
-        return info
-
-    @staticmethod
-    def detect_pkg_manager() -> Optional[str]:
-        """Detect the system's package manager with enhanced detection."""
-        managers = {
-            "apt": "/usr/bin/apt",
-            "pacman": "/usr/bin/pacman",
-            "dnf": "/usr/bin/dnf",
-            "zypper": "/usr/bin/zypper",
-            "xbps-install": "/usr/bin/xbps-install",
-            "apk": "/sbin/apk",
-            "nix": "/run/current-system/sw/bin/nix",
-            "brew": "/usr/local/bin/brew"
-        }
+        # Body with system metrics
+        metrics = self.monitor.collect_metrics()
+        metrics_table = Table(show_header=True, header_style="bold magenta", box=HEAVY)
+        metrics_table.add_column("Metric")
+        metrics_table.add_column("Value")
         
-        for manager, path in managers.items():
-            if os.path.exists(path):
-                return manager
-        return None
+        metrics_table.add_row(
+            "CPU Usage",
+            f"{metrics['cpu_percent']}%"
+        )
+        metrics_table.add_row(
+            "Memory Usage",
+            f"{metrics['memory_percent']}%"
+        )
+        metrics_table.add_row(
+            "Disk Usage",
+            f"{metrics['disk_usage']}%"
+        )
+        
+        # Package statistics
+        pkg_stats = self.get_package_stats()
+        pkg_table = Table(show_header=True, header_style="bold blue", box=HEAVY)
+        pkg_table.add_column("Package Stats")
+        pkg_table.add_column("Count")
+        
+        for stat, count in pkg_stats.items():
+            pkg_table.add_row(stat, str(count))
+        
+        # Combine tables in body
+        body_layout = Layout()
+        body_layout.split_row(
+            Layout(Panel(metrics_table, title="System Metrics")),
+            Layout(Panel(pkg_table, title="Package Statistics"))
+        )
+        
+        # Footer with quick stats
+        footer = Panel(
+            f"Last Update: {self.get_last_update_time()} | "
+            f"Pending Updates: {self.get_pending_updates_count()}",
+            style="cyan"
+        )
+        
+        # Update layout
+        layout["header"].update(header)
+        layout["body"].update(body_layout)
+        layout["footer"].update(footer)
+        
+        self.console.print(layout)
+    
+    def show_menu(self) -> None:
+        """Display enhanced interactive menu."""
+        menu_items = [
+            ("1", "🔍", "Search Packages", "Search for packages in repositories"),
+            ("2", "📦", "Install Packages", "Install new packages"),
+            ("3", "🗑️", "Remove Packages", "Remove installed packages"),
+            ("4", "🔄", "Update System", "Update system and packages"),
+            ("5", "🧹", "Clean System", "Clean package cache and orphans"),
+            ("6", "ℹ️", "Package Info", "Display package information"),
+            ("7", "📋", "List Packages", "List installed packages"),
+            ("8", "🔒", "Hold Package", "Prevent package updates"),
+            ("9", "🔓", "Unhold Package", "Allow package updates"),
+            ("10", "🔗", "Dependencies", "Show package dependencies"),
+            ("11", "📊", "Package Size", "Show package disk usage"),
+            ("12", "📜", "History", "View operation history"),
+            ("13", "💾", "Backup", "Create system backup"),
+            ("14", "📈", "Monitor", "System monitoring dashboard"),
+            ("15", "⚙️", "Settings", "Configure tool settings"),
+            ("16", "❌", "Exit", "Exit PKG Tool")
+        ]
+        
+        menu_table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            box=HEAVY,
+            title="PKG Tool Menu",
+            title_style="bold cyan"
+        )
+        
+        menu_table.add_column("Key", style="cyan", width=4)
+        menu_table.add_column("", width=2)
+        menu_table.add_column("Option", style="white")
+        menu_table.add_column("Description", style="dim")
+        
+        for key, icon, option, description in menu_items:
+            menu_table.add_row(key, icon, option, description)
+        
+        self.console.print(Panel(menu_table))
 
-    COMMANDS = {
-        "apt": {
-            "search": "apt search {pkg}",
-            "install": "sudo apt install -y {pkg}",
-            "remove": "sudo apt remove -y {pkg}",
-            "update": "sudo apt update && sudo apt upgrade -y",
-            "clean": "sudo apt autoremove -y && sudo apt clean",
-            "info": "apt show {pkg}",
-            "list": "apt list --installed",
-            "hold": "sudo apt-mark hold {pkg}",
-            "unhold": "sudo apt-mark unhold {pkg}",
-            "depends": "apt-cache depends {pkg}",
-            "size": "apt-cache show {pkg} | grep 'Size'",
-            "backup": "dpkg --get-selections > {backup_file}",
-            "restore": "sudo dpkg --set-selections < {backup_file} && sudo apt-get dselect-upgrade",
-            "verify": "debsums {pkg}",
-            "orphans": "deborphan",
-        },
-        # Add similar extended commands for other package managers...
-    }
-
-    def execute_command(self, command: str) -> Tuple[bool, str]:
-        """Execute a shell command with progress indication."""
+  async def handle_command(self, command: str) -> Tuple[bool, str]:
+        """Execute command asynchronously with progress indication."""
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]Executing command..."),
-            transient=True
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         ) as progress:
-            task = progress.add_task("", total=None)
+            task = progress.add_task("Executing", total=100)
+            
             try:
-                result = subprocess.run(
+                # Create subprocess
+                process = await asyncio.create_subprocess_shell(
                     command,
-                    shell=True,
-                    check=True,
-                    text=True,
-                    capture_output=True
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
                 )
-                return True, result.stdout
-            except subprocess.CalledProcessError as e:
-                return False, e.stderr
-
-    def create_backup(self) -> None:
-        """Create a backup of installed packages."""
-        if not self.config['backup_enabled']:
-            self.console.print("[yellow]Backup feature is disabled in config[/]")
-            return
-
-        backup_dir = Path(self.config['backup_dir'])
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_file = backup_dir / f"pkg_backup_{timestamp}.json"
-        
-        with Progress() as progress:
-            task = progress.add_task("[cyan]Creating backup...", total=100)
-            
-            # Get list of installed packages
-            success, output = self.execute_command(self.COMMANDS[self.manager]["list"])
-            if not success:
-                self.console.print("[red]Backup failed![/]")
-                return
                 
-            backup_data = {
-                'timestamp': timestamp,
-                'package_manager': self.manager,
-                'system_info': self.get_system_info(),
-                'packages': output.splitlines()
-            }
-            
-            progress.update(task, advance=50)
-            
-            # Save backup
-            with open(backup_file, 'w') as f:
-                json.dump(backup_data, f, indent=2)
+                progress.update(task, advance=50)
+                stdout, stderr = await process.communicate()
+                progress.update(task, advance=50)
                 
-            progress.update(task, advance=50)
-        
-        self.console.print(f"[green]Backup created successfully: {backup_file}[/]")
+                if process.returncode == 0:
+                    return True, stdout.decode()
+                return False, stderr.decode()
+                
+            except Exception as e:
+                return False, str(e)
 
-    def show_dashboard(self) -> None:
-        """Display system package management dashboard."""
+    def get_package_stats(self) -> Dict[str, int]:
+        """Get statistics about installed packages."""
+        stats = {
+            "Total Packages": 0,
+            "Recently Updated": 0,
+            "Held Packages": 0,
+            "Pending Updates": 0
+        }
+        
+        try:
+            # Get total packages
+            success, output = asyncio.run(self.handle_command(
+                self.PACKAGE_MANAGERS[self.manager]["commands"]["list"]
+            ))
+            if success:
+                stats["Total Packages"] = len(output.splitlines())
+            
+            # Get held packages
+            if "hold" in self.PACKAGE_MANAGERS[self.manager]["commands"]:
+                success, output = asyncio.run(self.handle_command(
+                    f"dpkg --get-selections | grep hold" if self.manager == "apt"
+                    else self.PACKAGE_MANAGERS[self.manager]["commands"]["list"] + " | grep 'hold'"
+                ))
+                if success:
+                    stats["Held Packages"] = len(output.splitlines())
+            
+            # Calculate other stats from our database
+            with sqlite3.connect(str(self.package_db.db_path)) as conn:
+                # Recently updated (last 7 days)
+                week_ago = int(time.time()) - (7 * 24 * 60 * 60)
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM packages WHERE install_date > ?",
+                    (week_ago,)
+                )
+                stats["Recently Updated"] = cursor.fetchone()[0]
+                
+                # Pending updates (flagged in our db)
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM packages WHERE status = 'update-available'"
+                )
+                stats["Pending Updates"] = cursor.fetchone()[0]
+                
+        except Exception as e:
+            logging.error(f"Error getting package stats: {e}")
+        
+        return stats
+
+    def get_last_update_time(self) -> str:
+        """Get formatted timestamp of last system update."""
+        try:
+            with sqlite3.connect(str(self.monitor.db_path)) as conn:
+                cursor = conn.execute(
+                    """SELECT timestamp FROM package_operations 
+                    WHERE operation = 'update' AND status = 'success' 
+                    ORDER BY timestamp DESC LIMIT 1"""
+                )
+                row = cursor.fetchone()
+                if row:
+                    return datetime.fromtimestamp(row[0]).strftime("%Y-%m-%d %H:%M")
+        except Exception as e:
+            logging.error(f"Error getting last update time: {e}")
+        return "Never"
+
+    def get_pending_updates_count(self) -> int:
+        """Get count of available package updates."""
+        try:
+            success, output = asyncio.run(self.handle_command(
+                "apt list --upgradable" if self.manager == "apt"
+                else self.PACKAGE_MANAGERS[self.manager]["commands"]["list"] + " -u"
+            ))
+            if success:
+                return len(output.splitlines()) - 1  # Subtract header line
+        except Exception as e:
+            logging.error(f"Error checking pending updates: {e}")
+        return 0
+
+    async def process_menu_choice(self, choice: str) -> bool:
+        """Process menu selection and execute corresponding action."""
+        try:
+            if choice == "16":
+                return False  # Exit program
+            
+            if choice == "14":  # System monitoring dashboard
+                self.show_monitoring_dashboard()
+            elif choice == "15":  # Settings
+                self.show_settings()
+            elif choice == "12":  # History
+                self.show_history()
+            elif choice == "13":  # Backup
+                await self.create_backup()
+            else:
+                # Handle package operations
+                command_map = {
+                    "1": "search", "2": "install", "3": "remove",
+                    "4": "update", "5": "clean", "6": "info",
+                    "7": "list", "8": "hold", "9": "unhold",
+                    "10": "depends", "11": "size"
+                }
+                
+                if choice in command_map:
+                    command_type = command_map[choice]
+                    if command_type in ("install", "remove", "hold", "unhold"):
+                        packages = Prompt.ask("Enter package name(s)").split()
+                        for pkg in packages:
+                            command = self.PACKAGE_MANAGERS[self.manager]["commands"][command_type]
+                            success, output = await self.handle_command(command.format(pkg=pkg))
+                            self.console.print(output)
+                    else:
+                        command = self.PACKAGE_MANAGERS[self.manager]["commands"][command_type]
+                        if "{pkg}" in command:
+                            pkg = Prompt.ask("Enter package name")
+                            command = command.format(pkg=pkg)
+                        success, output = await self.handle_command(command)
+                        self.console.print(output)
+            
+            return True
+        except Exception as e:
+            self.console.print(f"[red]Error processing command: {e}[/]")
+            return True
+
+    def show_monitoring_dashboard(self) -> None:
+        """Display system monitoring dashboard with historical data."""
+        metrics = self.monitor.get_historical_metrics(hours=24)
+        
+        # Create metrics visualization
         layout = Layout()
         layout.split_column(
-            Layout(name="header"),
-            Layout(name="body"),
-            Layout(name="footer")
+            Layout(name="header", size=3),
+            Layout(name="charts"),
+            Layout(name="footer", size=3)
         )
         
-        # Header
-        header = Table.grid()
-        header.add_row(
-            f"[bold cyan]PKG Tool v{self.VERSION}[/] by [bold red]{self.AUTHOR}[/]"
+        # Add metric charts using ASCII art or tables
+        metrics_panel = Panel(
+            self.create_metrics_display(metrics),
+            title="System Metrics (Last 24 Hours)",
+            subtitle="Press 'q' to return to main menu"
         )
+        layout["charts"].update(metrics_panel)
         
-        # System info
-        system_info = self.get_system_info()
-        info_table = Table(show_header=False, box=None)
-        for key, value in system_info.items():
-            info_table.add_row(f"[dim]{key}:[/]", f"[bold]{value}[/]")
-        
-        layout["header"].update(Panel(header))
-        layout["body"].update(Panel(info_table))
-        
-        self.console.print(layout)
+        with Live(layout, refresh_per_second=1) as live:
+            while True:
+                if self.check_for_quit():
+                    break
+                metrics = self.monitor.get_historical_metrics(hours=24)
+                live.update(layout)
 
-    def show_menu(self) -> None:
-        """Display the interactive menu with rich formatting."""
-        self.show_dashboard()
-        
-        menu_table = Table(show_header=False, box=None)
-        menu_items = [
-            ("1", "🔍 Search packages"),
-            ("2", "📦 Install packages"),
-            ("3", "🗑️ Remove packages"),
-            ("4", "🔄 Update system"),
-            ("5", "🧹 Clean system"),
-            ("6", "ℹ️ Package information"),
-            ("7", "📋 List installed packages"),
-            ("8", "🔒 Hold package version"),
-            ("9", "🔓 Unhold package version"),
-            ("10", "🔗 Show dependencies"),
-            ("11", "📊 Show package size"),
-            ("12", "📜 View history"),
-            ("13", "💾 Create backup"),
-            ("14", "⚙️ Settings"),
-            ("15", "❌ Exit")
-        ]
-        
-        for key, label in menu_items:
-            menu_table.add_row(
-                f"[cyan]{key}[/]",
-                f"[bold white]{label}[/]"
-            )
-        
-        self.console.print(Panel(menu_table, title="Main Menu"))
-
-    def run(self) -> None:
-        """Enhanced main program loop."""
+    async def run(self) -> None:
+        """Main program loop with asyncio support."""
         if not self.manager:
             self.console.print("[red]Unsupported package manager or distribution.[/]")
             sys.exit(1)
 
-        while True:
-            self.show_menu()
-            choice = Prompt.ask("Enter your choice", choices=[str(i) for i in range(1, 16)])
-            
-            if choice == "15":
-                self.console.print("[cyan]Goodbye! 👋[/]")
-                sys.exit(0)
+        try:
+            running = True
+            while running:
+                self.show_dashboard()
+                self.show_menu()
                 
-            # Handle menu choices with new features...
-            # (Implementation of other menu options would follow here)
+                choice = Prompt.ask(
+                    "Enter your choice",
+                    choices=[str(i) for i in range(1, 17)]
+                )
+                
+                running = await self.process_menu_choice(choice)
+                
+                if running and choice != "14":  # Not in monitoring dashboard
+                    self.console.print("\nPress Enter to continue...")
+                    input()
+                
+        except KeyboardInterrupt:
+            self.console.print("\n[yellow]Program terminated by user.[/]")
+        finally:
+            # Cleanup and save state
+            self.save_config()
+            sys.exit(0)
 
 if __name__ == "__main__":
+    # Set up asyncio event loop
+    loop = asyncio.get_event_loop()
+    tool = PKGTool()
+    
     try:
-        tool = PKGTool()
-        tool.run()
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Program terminated by user.[/]")
-        sys.exit(0)
+        loop.run_until_complete(tool.run())
+    except Exception as e:
+        logging.error(f"Fatal error: {e}")
+        sys.exit(1)
+    finally:
+        loop.close()
